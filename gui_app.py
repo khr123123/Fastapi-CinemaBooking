@@ -5,6 +5,8 @@ Tkinter GUI クライアント
 import tkinter as tk
 from tkinter import ttk, messagebox, font
 import requests
+from PIL import Image, ImageTk
+import io
 import threading
 import uuid
 from datetime import datetime
@@ -45,6 +47,7 @@ class CinemaBookingApp:
         self._setup_styles()
         self._build_ui()
         self._load_movies()
+        self._start_seat_polling()
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -140,12 +143,15 @@ class CinemaBookingApp:
         self.movie_listbox.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
         self.movie_listbox.bind("<<ListboxSelect>>", self._on_movie_select)
 
+        self.poster_label = tk.Label(left, bg=COLORS["panel"])
+        self.poster_label.pack(pady=10)
+
         tk.Button(
             left, text="🔄 更新",
             command=self._load_movies,
             bg=COLORS["accent"], fg="white",
             font=("Helvetica", 10, "bold"),
-            relief=tk.FLAT, cursor="hand2",
+            relief=tk.RAISED, bd=2, cursor="hand2",
         ).pack(fill=tk.X, padx=15, pady=(0, 15))
 
         # 中央パネル：座席選択
@@ -222,7 +228,7 @@ class CinemaBookingApp:
             command=self._lock_seats,
             bg=COLORS["locked"], fg="white",
             font=("Helvetica", 11, "bold"),
-            relief=tk.FLAT, cursor="hand2", state=tk.DISABLED,
+            relief=tk.RAISED, bd=2, cursor="hand2", state=tk.DISABLED,
         )
         self.btn_lock.pack(fill=tk.X, padx=15, pady=5)
 
@@ -231,7 +237,7 @@ class CinemaBookingApp:
             command=self._create_order,
             bg=COLORS["accent"], fg="white",
             font=("Helvetica", 11, "bold"),
-            relief=tk.FLAT, cursor="hand2", state=tk.DISABLED,
+            relief=tk.RAISED, bd=2, cursor="hand2", state=tk.DISABLED,
         )
         self.btn_pay.pack(fill=tk.X, padx=15, pady=5)
 
@@ -240,7 +246,7 @@ class CinemaBookingApp:
             command=self._release_seats,
             bg=COLORS["text_dim"], fg="white",
             font=("Helvetica", 10),
-            relief=tk.FLAT, cursor="hand2", state=tk.DISABLED,
+            relief=tk.RAISED, bd=2, cursor="hand2", state=tk.DISABLED,
         )
         self.btn_release.pack(fill=tk.X, padx=15, pady=5)
 
@@ -259,7 +265,7 @@ class CinemaBookingApp:
             command=self._load_orders,
             bg=COLORS["accent"], fg="white",
             font=("Helvetica", 10, "bold"),
-            relief=tk.FLAT, cursor="hand2",
+            relief=tk.RAISED, bd=2, cursor="hand2",
         ).pack(side=tk.RIGHT, padx=15)
 
         columns = ("注文番号", "上映回ID", "座席", "金額", "状態", "日時")
@@ -291,7 +297,7 @@ class CinemaBookingApp:
             command=self._load_stats,
             bg=COLORS["accent"], fg="white",
             font=("Helvetica", 11, "bold"),
-            relief=tk.FLAT, cursor="hand2", padx=20, pady=8,
+            relief=tk.RAISED, bd=2, cursor="hand2", padx=20, pady=8,
         ).pack(pady=10)
 
     # ========== API 呼び出し ==========
@@ -357,6 +363,34 @@ class CinemaBookingApp:
         self._load_seats()
         self._update_summary()
 
+
+    def _start_seat_polling(self):
+        self._refresh_seats()
+        self.root.after(3000, self._start_seat_polling)
+
+    def _refresh_seats(self):
+        if not self.current_showtime:
+            return
+        # Only fetch status if not creating new buttons to avoid blinking
+        seats = self._api_get(f"/seats/{self.current_showtime['id']}")
+        if not seats:
+            return
+        for seat in seats:
+            sid = seat["id"]
+            if sid in self.seat_buttons:
+                btn = self.seat_buttons[sid]
+                # Do not change if selected by me
+                if sid in self.selected_seats:
+                    continue
+                if seat["status"] == "booked":
+                    btn.config(bg=COLORS["booked"], state=tk.DISABLED)
+                elif seat["status"] == "locked":
+                    if sid in self.locked_seat_ids:
+                        btn.config(bg=COLORS["selected"], state=tk.NORMAL)
+                    else:
+                        btn.config(bg=COLORS["locked"], state=tk.DISABLED)
+                else:
+                    btn.config(bg=COLORS["available"], state=tk.NORMAL)
     def _load_seats(self):
         if not self.current_showtime:
             return
@@ -395,11 +429,11 @@ class CinemaBookingApp:
                 width=4, height=2,
                 bg=color, fg="white",
                 font=("Helvetica", 9, "bold"),
-                relief=tk.FLAT, cursor="hand2",
+                relief=tk.RAISED, bd=2, cursor="hand2",
                 state=state,
                 command=lambda s=sid: self._toggle_seat(s),
             )
-            btn.grid(row=row, column=col, padx=2, pady=2)
+            btn.grid(row=row, column=col, padx=5, pady=(abs(col - 4.5)*10, 2))
             # 中央通路
             if col == 4:
                 tk.Frame(self.seat_frame, width=20, bg=COLORS["bg"]).grid(row=row, column=99)
@@ -544,26 +578,34 @@ class CinemaBookingApp:
         if not stats:
             return
         ls = stats["lock_stats"]
+        success_rate = (ls['lock_success']/max(ls['lock_attempts'],1)*100)
         text = f"""
-╔════════════════════════════════════════════╗
-║       🎬 システム統計ダッシュボード         ║
-╚════════════════════════════════════════════╝
+✨🌟✨ リアルタイム・シネマダッシュボード ✨🌟✨
+===================================================
 
-📊 ロック統計（メモリ層）
-  ├─ 総ロック試行数:     {ls['lock_attempts']:>6}
-  ├─ ロック成功:         {ls['lock_success']:>6}
-  ├─ 競合（衝突）:       {ls['lock_conflicts']:>6}
-  ├─ ロック解放:         {ls['lock_released']:>6}
-  └─ 現在アクティブ:     {stats['active_locks']:>6}
+    📊 【 ロック統計（メモリ層） 】
+    ---------------------------------------------
+       ▶ 総ロック試行数:    {ls['lock_attempts']:>8} 回
+       ▶ ロック成功:        {ls['lock_success']:>8} 回
+       ▶ 競合（衝突）:      {ls['lock_conflicts']:>8} 回
+       ▶ ロック解放:        {ls['lock_released']:>8} 回
+       ▶ 現在アクティブ:    {stats['active_locks']:>8} 席
 
-💰 ビジネス統計（DB層）
-  ├─ 総注文数:           {stats['total_orders']:>6}
-  └─ 総売上:           ¥{int(stats['total_revenue']):>8}
+    💰 【 ビジネス統計（DB層） 】
+    ---------------------------------------------
+       ▶ 総注文数:          {stats['total_orders']:>8} 件
+       ▶ 総売上:          ¥{int(stats['total_revenue']):>8}
 
-📈 成功率: {(ls['lock_success']/max(ls['lock_attempts'],1)*100):.1f}%
+    📈 【 パフォーマンス 】
+    ---------------------------------------------
+       ▶ ロック成功率:      {success_rate:>8.1f} %
+
+===================================================
 """
         self.stats_text.delete("1.0", tk.END)
         self.stats_text.insert(tk.END, text)
+        self.stats_text.configure(font=("Courier New", 14, "bold"))
+
 
 
 def main():
